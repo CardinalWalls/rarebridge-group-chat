@@ -1,0 +1,13 @@
+{
+  "name": "rarebridge-group-chat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node server.mjs",
+    "bootstrap": "node scripts/bootstrap.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}
