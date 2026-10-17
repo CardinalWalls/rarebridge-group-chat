@@ -1,9 +1,12 @@
 """Install one bounded local study agent/channel without changing existing roles."""
 from pathlib import Path
-import json,sys,os
+import json,sys,os,shutil
 from raft_client import RaftClient
 HERE=Path(__file__).resolve().parent;ROOT=HERE.parent
 RUNTIME=Path(os.environ["RAFT_RUNTIME_DIR"]);STATE=HERE/'.runtime';STATE.mkdir(exist_ok=True)
+if not shutil.which("grok"):raise RuntimeError("Grok CLI missing on this host; install and authenticate it before setup")
+GROK_HOME=Path(os.environ.get("GROK_HOME",str(Path.home()/".grok"))).expanduser().resolve()
+if not GROK_HOME.is_dir():raise RuntimeError("GROK_HOME missing; run GROK_HOME=/private/path grok login first")
 seed=json.loads((RUNTIME/'.dev-env-rarebridge-chat.json').read_text())
 base={'api':'http://127.0.0.1:13019','server_id':seed['server']['id'],'seed_file':str(RUNTIME/'.dev-env-rarebridge-chat.json')}
 client=RaftClient(base)
@@ -32,6 +35,6 @@ skilldir=workspace/'.agents/skills/living-scale';skilldir.mkdir(parents=True,exi
 ''')
 mcp={'mcpServers':[{'name':'living-scale','command':str(ROOT/'.venv/bin/python'),'args':[str(HERE/'mcp_server.py'),'--binding',str(statefile)],'env':[{'name':'MONITORING_MODEL_TIMEOUT','value':'180'}]}]}
 config=STATE/'mcp.json';config.write_text(json.dumps(mcp,ensure_ascii=False,indent=2))
-client.request('agents/'+binding['agent_id'],'PATCH',{'displayName':'量表研究助手','envVars':{'LIVING_SCALE_MCP_CONFIG':str(config),'GROK_HOME':str(RUNTIME/'.slockdev/rarebridge-chat/grok-home')}})
+client.request('agents/'+binding['agent_id'],'PATCH',{'displayName':'量表研究助手','envVars':{'LIVING_SCALE_MCP_CONFIG':str(config),'GROK_HOME':str(GROK_HOME)}})
 client.request('agents/'+binding['agent_id']+'/reset','POST',{'mode':'session'})
 print(json.dumps({'agent_id':binding['agent_id'],'channel_id':binding['channel_id'],'binding':str(statefile)},ensure_ascii=False))

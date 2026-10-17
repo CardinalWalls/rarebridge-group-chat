@@ -30,3 +30,17 @@ Current stage is source delivery on GitHub. The user will continue cloud hosting
 Verification: existing configured Python environment imported the packaged service and initialized a fresh empty SQLite database; JS syntax and four app tests pass. Fresh-machine dependency installation, complete clean-checkout Raft startup, cloud OCR and correlated public-message MCP acceptance have not been verified. This is a stage source snapshot, not a certified turnkey cloud release.
 
 Clean-clone verification (2026-10-16): git clone into /tmp/rarebridge-clean-f052eec succeeded; npm test passed 4/4; using the existing Python environment with installed requirements, importing packaged IntegratedService and initializing an empty temporary SQLite database passed; MCP ClientSession initialize + list_tools against the cloned 接口实现/mcp_server.py passed with 15 tools. No patient database was used. These checks do not install dependencies on a new machine or start a new full Raft stack.
+
+## Grok CLI startup correction (2026-10-16)
+
+The earlier setup.py forced GROK_HOME into a new isolated runtime directory without ensuring it was authenticated. Logging into the default ~/.grok directory did not authenticate that other directory. This has been corrected: setup now respects an explicitly supplied GROK_HOME, otherwise uses ~/.grok, and checks that Grok is installed and its home directory exists before creating/resetting the role. Directory existence does NOT prove a valid login.
+
+On the actual deployment host, install the official Grok CLI separately, then run:
+
+    export GROK_HOME=/absolute/private/grok-home
+    grok login
+    export RAFT_RUNTIME_DIR=/absolute/path/to/isolated/raft
+    living-scale/.venv/bin/python scripts/check-runtime.py
+    living-scale/.venv/bin/python living-scale/聊天联调/setup.py
+
+Run a small real Grok request on that host to verify model authorization and network before accepting the full flow. Do not upload your local Grok authentication directory. The repository does not contain the Grok CLI binary or credentials; it is not a self-contained deployment image. A GitHub checkout alone cannot supply these prerequisites. The target environment must actually permit installing and launching the CLI, persistent daemon processes, network access and private credential storage. Whether a particular Grok Build environment supports those requirements must be checked there; this project has not verified it. Do not substitute an API client or mock while claiming it is the same CLI execution.
