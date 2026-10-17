@@ -28,3 +28,5 @@ Read README, this document, and docs/GROK-CLOUD.md. Provision persistent Postgre
 Current stage is source delivery on GitHub. The user will continue cloud hosting in Grok Build; a temporary local tunnel does not establish cloud deployment completion.
 
 Verification: existing configured Python environment imported the packaged service and initialized a fresh empty SQLite database; JS syntax and four app tests pass. Fresh-machine dependency installation, complete clean-checkout Raft startup, cloud OCR and correlated public-message MCP acceptance have not been verified. This is a stage source snapshot, not a certified turnkey cloud release.
+
+Clean-clone verification (2026-10-16): git clone into /tmp/rarebridge-clean-f052eec succeeded; npm test passed 4/4; using the existing Python environment with installed requirements, importing packaged IntegratedService and initializing an empty temporary SQLite database passed; MCP ClientSession initialize + list_tools against the cloned 接口实现/mcp_server.py passed with 15 tools. No patient database was used. These checks do not install dependencies on a new machine or start a new full Raft stack.
