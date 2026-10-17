@@ -65,3 +65,6 @@ npm test
 本项目独立新增代码采用 MIT。Raft 源码不复制进本包，通过固定版本单独取得；它仍采用 [FSL-1.1-ALv2](https://github.com/botiverse/raft-source/blob/05f7d8fd77d2535f993d5d90b85118438bc18216/LICENSE)。Raft 是源码可用，不把它整体宣称为MIT项目。
 
 发布顺序：本地端到端通过 → 检查公开文件 → GitHub发布 → Grok云端实际部署。Grok发布网页的能力不等于已经验证支持完整Raft的数据库、Socket.IO和长期daemon；部署结果以实际URL及运行检查为准。
+
+## Living-scale stage snapshot
+See [MCP/native card setup and Grok Build handoff](docs/LIVING-SCALE.md). Source delivery includes no patient records or credentials; full correlated public message acceptance remains incomplete.

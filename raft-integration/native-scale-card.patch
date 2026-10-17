@@ -1,0 +1,594 @@
+diff --git a/packages/daemon/src/drivers/grok.ts b/packages/daemon/src/drivers/grok.ts
+index ef02d91..7721c42 100644
+--- a/packages/daemon/src/drivers/grok.ts
++++ b/packages/daemon/src/drivers/grok.ts
+@@ -15,6 +15,7 @@ import {
+ } from "@botiverse/raft-shared";
+ import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport.js";
+ import { resolveGrokHomeFromEnv } from "./grokHome.js";
++import { loadScaleMcpServers } from "./scaleMcpConfig.js";
+ import {
+   parseGrokJsonRpcLine,
+   GrokEventNormalizer,
+@@ -399,6 +400,9 @@ export class GrokDriver implements RuntimeDriver {
+   async spawn(ctx: SpawnContext): Promise<SpawnResult> {
+     const { spawnEnv } = await prepareCliTransport(ctx, { NO_COLOR: "1" });
+     const launchFields = runtimeConfigToLaunchFields(hydrateRuntimeConfig(ctx.config));
++    const mcpServers = loadScaleMcpServers(
++      launchFields.envVars?.LIVING_SCALE_MCP_CONFIG ?? spawnEnv.LIVING_SCALE_MCP_CONFIG,
++    );
+     this.process = null;
+     this.requestId = 0;
+     this.initializeRequestId = null;
+@@ -427,7 +431,7 @@ export class GrokDriver implements RuntimeDriver {
+     this.autoApprovePermissionRequests = grokLaunchAllowsPermissionAutoApproval(GROK_AGENT_ARGS, meta);
+     this.freshSessionParams = {
+       cwd: ctx.workingDirectory,
+-      mcpServers: [],
++      mcpServers,
+       _meta: meta,
+     };
+     const sessionRequest = this.requestedResumeSessionId
+@@ -436,7 +440,7 @@ export class GrokDriver implements RuntimeDriver {
+           params: {
+             sessionId: this.requestedResumeSessionId,
+             cwd: ctx.workingDirectory,
+-            mcpServers: [],
++            mcpServers,
+             _meta: meta,
+           },
+         }
+diff --git a/packages/daemon/src/drivers/scaleMcpConfig.test.ts b/packages/daemon/src/drivers/scaleMcpConfig.test.ts
+new file mode 100644
+index 0000000..044ddce
+--- /dev/null
++++ b/packages/daemon/src/drivers/scaleMcpConfig.test.ts
+@@ -0,0 +1,35 @@
++import assert from "node:assert/strict";
++import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
++import os from "node:os";
++import path from "node:path";
++import { test } from "vitest";
++import { loadScaleMcpServers } from "./scaleMcpConfig.js";
++
++const server = { name: "living-scale", command: "/usr/bin/python3", args: ["/tmp/mcp_server.py", "--binding", "/tmp/binding.json"], env: [{ name: "PYTHONUNBUFFERED", value: "1" }] };
++function withConfig(value: unknown, run: (file: string) => void) {
++  const dir = mkdtempSync(path.join(os.tmpdir(), "scale-mcp-"));
++  try {
++    const file = path.join(dir, "mcp.json");
++    writeFileSync(file, JSON.stringify(value));
++    run(file);
++  } finally { rmSync(dir, { recursive: true, force: true }); }
++}
++test("scoped MCP remains disabled without explicit config and preserves ACP stdio fields", () => {
++  assert.deepEqual(loadScaleMcpServers(), []);
++  withConfig({ mcpServers: [server] }, (file) => assert.deepEqual(loadScaleMcpServers(file), [server]));
++});
++test("invalid explicit MCP paths fail without leaking file contents", () => {
++  assert.throws(() => loadScaleMcpServers("relative.json"), /must be absolute/);
++  assert.throws(() => loadScaleMcpServers("/nonexistent/scale.json"), /cannot read or parse/);
++});
++for (const value of [
++  {}, { mcpServers: "wrong" }, { mcpServers: [server], secret: "never-print" },
++  { mcpServers: [{ ...server, command: "python3" }] },
++  { mcpServers: [{ ...server, args: [1] }] },
++  { mcpServers: [{ ...server, env: { TOKEN: "never-print" } }] },
++  { mcpServers: [{ ...server, env: [{ name: "BAD-NAME", value: "x" }] }] },
++  { mcpServers: [{ ...server, url: "https://unexpected" }] },
++  { mcpServers: [server, server] },
++]) test(`reject invalid ACP configuration ${JSON.stringify(value).slice(0, 55)}`, () => {
++  withConfig(value, (file) => assert.throws(() => loadScaleMcpServers(file), /Invalid LIVING_SCALE_MCP_CONFIG/));
++});
+diff --git a/packages/daemon/src/drivers/scaleMcpConfig.ts b/packages/daemon/src/drivers/scaleMcpConfig.ts
+new file mode 100644
+index 0000000..83fbdec
+--- /dev/null
++++ b/packages/daemon/src/drivers/scaleMcpConfig.ts
+@@ -0,0 +1,55 @@
++import { readFileSync } from "node:fs";
++import path from "node:path";
++
++/** ACP stdio MCP server configuration, explicitly selected per agent launch. */
++export interface ScaleMcpServer {
++  name: string;
++  command: string;
++  args: string[];
++  env: { name: string; value: string }[];
++}
++
++function invalid(detail: string): never {
++  throw new Error(`Invalid LIVING_SCALE_MCP_CONFIG: ${detail}`);
++}
++function record(value: unknown, keys: string[], label: string): Record<string, unknown> {
++  if (!value || typeof value !== "object" || Array.isArray(value)) invalid(`${label} must be an object`);
++  const result = value as Record<string, unknown>;
++  if (Object.keys(result).some((key) => !keys.includes(key))) invalid(`${label} contains unsupported fields`);
++  return result;
++}
++function text(value: unknown, label: string, allowEmpty = false): string {
++  if (typeof value !== "string" || value.includes("\0") || (!allowEmpty && !value.trim())) invalid(`${label} must be a valid string`);
++  return value;
++}
++
++export function loadScaleMcpServers(configPath?: string | null): ScaleMcpServer[] {
++  if (configPath === undefined || configPath === null) return [];
++  if (!path.isAbsolute(text(configPath, "config path"))) invalid("config path must be absolute");
++  let parsed: unknown;
++  try { parsed = JSON.parse(readFileSync(configPath, "utf8")); }
++  catch { invalid("cannot read or parse the designated JSON file"); }
++  const config = record(parsed, ["mcpServers"], "config");
++  if (!Array.isArray(config.mcpServers)) invalid("mcpServers must be an array");
++  const names = new Set<string>();
++  return config.mcpServers.map((value, i) => {
++    const server = record(value, ["name", "command", "args", "env"], `server ${i}`);
++    const name = text(server.name, "server name");
++    if (names.has(name)) invalid("server names must be unique");
++    names.add(name);
++    const command = text(server.command, "command");
++    if (!path.isAbsolute(command)) invalid("command must be absolute");
++    if (!Array.isArray(server.args)) invalid("args must be an array");
++    const args = server.args.map((arg) => text(arg, "argument", true));
++    if (!Array.isArray(server.env)) invalid("env must be an array");
++    const envNames = new Set<string>();
++    const env = server.env.map((value) => {
++      const entry = record(value, ["name", "value"], "env entry");
++      const name = text(entry.name, "environment name");
++      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || envNames.has(name)) invalid("environment names must be valid and unique");
++      envNames.add(name);
++      return { name, value: text(entry.value, "environment value", true) };
++    });
++    return { name, command, args, env };
++  });
++}
+diff --git a/packages/web/package.json b/packages/web/package.json
+index 1c19153..1f71e31 100644
+--- a/packages/web/package.json
++++ b/packages/web/package.json
+@@ -35,6 +35,7 @@
+     "d3-selection": "^3.0.0",
+     "d3-zoom": "^3.0.0",
+     "emoji-picker-react": "4.19.1",
++    "fflate": "0.4.8",
+     "flexlayout-react": "0.9.2",
+     "html-to-image": "^1.11.13",
+     "lucide-react": "^0.575.0",
+diff --git a/packages/web/src/components/message/MessageInput.tsx b/packages/web/src/components/message/MessageInput.tsx
+index 9f8a1f1..e4fc259 100644
+--- a/packages/web/src/components/message/MessageInput.tsx
++++ b/packages/web/src/components/message/MessageInput.tsx
+@@ -719,6 +719,26 @@ export default function MessageInput({
+   const [alsoCreateTask, setAlsoCreateTask] = useState(false);
+   const textareaRef = useRef<HTMLTextAreaElement>(null);
+   const contentRef = useRef(content);
++  useEffect(() => {
++    const handleScaleCorrection = (event: Event) => {
++      const detail = (event as CustomEvent<unknown>).detail;
++      if (!detail || typeof detail !== "object") return;
++      const correction = detail as Record<string, unknown>;
++      if (correction.channel_id !== channelId || typeof correction.fact_ref !== "string" || !correction.fact_ref.trim()) return;
++      if (typeof correction.agent_id !== "string" || !correction.agent_id.trim() || typeof correction.agent_name !== "string" || !correction.agent_name.trim()) return;
++      const correctionText = `@${correction.agent_name} 更正事实 ${correction.fact_ref}：`;
++      const agentMention: MessageMention = { type: "agent", id: correction.agent_id, name: correction.agent_name };
++      setSelectedMentions(previous => [...previous.filter(mention => !(mention.type === "agent" && mention.id === agentMention.id)), agentMention]);
++      setContent(previous => previous.trim() ? `${previous}\n${correctionText}` : correctionText);
++      requestAnimationFrame(() => {
++        textareaRef.current?.focus();
++        const length = textareaRef.current?.value.length ?? 0;
++        textareaRef.current?.setSelectionRange(length, length);
++      });
++    };
++    window.addEventListener("scale-chart-correct", handleScaleCorrection);
++    return () => window.removeEventListener("scale-chart-correct", handleScaleCorrection);
++  }, [channelId]);
+   const pendingSenderMentionCursorRef = useRef<number | null>(null);
+   const imageInputRef = useRef<HTMLInputElement>(null);
+   const fileInputRef = useRef<HTMLInputElement>(null);
+diff --git a/packages/web/src/components/message/MessageItem.tsx b/packages/web/src/components/message/MessageItem.tsx
+index 256848b..c2e07c3 100644
+--- a/packages/web/src/components/message/MessageItem.tsx
++++ b/packages/web/src/components/message/MessageItem.tsx
+@@ -90,6 +90,7 @@ import Spinner from "../ui/Spinner";
+ import { isAudioPreviewAttachment, isDiffPatchAttachment, isDocumentPreviewAttachment, isVideoPreviewAttachment } from "./attachmentPreview";
+ import type { DiffAttachmentPreview, DocumentAttachmentPreview } from "./attachmentPreview";
+ import MarkdownContent from "../markdown/MarkdownContent";
++import ScaleChartCard, { parseScaleChartMessage, scaleChartIsSuperseded } from "./ScaleChartCard";
+ import { MessageReadReceiptScopeProvider } from "./messageReadReceiptScope";
+ import type { MessageReadReceiptScope } from "./messageReadReceiptScope";
+ import { projectReadReceipt } from "../../store/readReceiptDomain";
+@@ -2760,7 +2761,15 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
+     activeTranslationDisplay !== "original"
+       ? activeTranslationEntry?.translatedContent ?? null
+       : null;
++  const scaleChartPayload = useMemo(() => message.senderType === "agent" ? parseScaleChartMessage(message.content ?? "") : null, [message.content, message.senderType]);
++  const scaleChartSuperseded = useMessageStore(useCallback((state) => scaleChartPayload
++    ? scaleChartIsSuperseded(scaleChartPayload, message.channelId, state.channelMessages[message.channelId] ?? [])
++    : false, [scaleChartPayload, message.channelId]));
++  const displayScaleChartPayload = scaleChartPayload && scaleChartSuperseded
++    ? { ...scaleChartPayload, source_assessment: { ...scaleChartPayload.source_assessment, stale: true } }
++    : scaleChartPayload;
+   const showBilingualOriginal =
++    !scaleChartPayload &&
+     !!translatedContent &&
+     activeTranslationDisplay === "bilingual" &&
+     !!message.content;
+@@ -4337,7 +4346,7 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
+           messageId={message.id}
+           measurementKey={message.randomId ?? message.id}
+           measureBeforePaint={message.id.startsWith("optimistic-")}
+-          disabled={isActionCardMessage || !!forwardedBundleMetadata || !collapseLongMessages}
++          disabled={isActionCardMessage || !!scaleChartPayload || !!forwardedBundleMetadata || !collapseLongMessages}
+         >
+         <div
+           ref={messageBodyRef}
+@@ -4361,6 +4370,9 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
+                 />
+               );
+             }
++            if (scaleChartPayload) {
++              return <ScaleChartCard payload={displayScaleChartPayload!} serverSlug={serverSlug} channelId={message.channelId} agentId={message.senderId} agentName={senderMention?.name ?? message.senderName} />;
++            }
+             if (isTranslationPending) {
+               return (
+                 <Skeleton
+diff --git a/packages/web/src/components/message/ScaleChartCard.tsx b/packages/web/src/components/message/ScaleChartCard.tsx
+new file mode 100644
+index 0000000..68d80e3
+--- /dev/null
++++ b/packages/web/src/components/message/ScaleChartCard.tsx
+@@ -0,0 +1,159 @@
++import { gunzipSync } from "fflate";
++import { buildMessagePermalink } from "../../hooks/useAppNavigate";
++
++type RecordValue = Record<string, unknown>;
++interface Fact extends RecordValue { fact_ref: string; concept: string; }
++export interface ScaleChartPayload extends RecordValue {
++  presentation_version: "chat-scale-card-1.0";
++  message_type: "scale_chart_update";
++  source_assessment: RecordValue & { assessment_id: string; patient_id: string; stale: boolean };
++  facts: Fact[];
++  scales: Record<string, RecordValue>;
++  display_context: RecordValue;
++  interpretation: RecordValue;
++  warning: RecordValue;
++  source_messages: Array<{ message_id: string; channel_id: string }>;
++  history: RecordValue[];
++  trend: RecordValue;
++}
++const object = (value: unknown): value is RecordValue => !!value && typeof value === "object" && !Array.isArray(value);
++const nonempty = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
++
++/** Only an entire, validated fenced message is replaced; malformed content retains normal markdown. */
++export function parseScaleChartMessage(content: string): ScaleChartPayload | null {
++  const match = /^\s*```scale_chart_update\s*\n([\s\S]*?)\n```\s*$/.exec(content);
++  if (!match || match[1].length > 1_000_000) return null;
++  try {
++    let p: unknown = JSON.parse(match[1]);
++    if (object(p) && p.encoding === "gzip-base64") {
++      const size = p.uncompressed_bytes;
++      if (typeof size !== "number" || !Number.isInteger(size) || size <= 0 || size > 2_000_000 || typeof p.data !== "string" || p.data.length > 42_668 || !/^[A-Za-z0-9+/]*={0,2}$/.test(p.data) || p.data.length % 4 !== 0) return null;
++      const binary = atob(p.data);
++      if (binary.length < 18 || binary.length > 32_000) return null;
++      const compressed = Uint8Array.from(binary, char => char.charCodeAt(0));
++      const trailerSize = new DataView(compressed.buffer).getUint32(compressed.length - 4, true);
++      if (compressed[0] !== 0x1f || compressed[1] !== 0x8b || trailerSize !== size) return null;
++      const uncompressed = gunzipSync(compressed);
++      if (uncompressed.length !== size) return null;
++      p = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(uncompressed));
++    }
++    if (!object(p) || p.presentation_version !== "chat-scale-card-1.0" || p.message_type !== "scale_chart_update") return null;
++    const a = p.source_assessment;
++    if (!object(a) || !nonempty(a.assessment_id) || !nonempty(a.patient_id) || typeof a.stale !== "boolean" || !Number.isInteger(a.assessment_revision)) return null;
++    if (!Array.isArray(p.facts) || !p.facts.every(f => object(f) && nonempty(f.fact_ref) && nonempty(f.concept))) return null;
++    if (!object(p.scales) || !Object.values(p.scales).every(s => object(s) && object(s.entry) && object(s.process) && object(s.result))) return null;
++    if (![p.display_context, p.interpretation, p.warning, p.source_profile, p.trend, p.update].every(object)) return null;
++    if (!Array.isArray(p.history) || !p.history.every(object) || !Array.isArray(p.source_messages) || !p.source_messages.every(s => object(s) && nonempty(s.message_id) && nonempty(s.channel_id))) return null;
++    return p as unknown as ScaleChartPayload;
++  } catch { return null; }
++}
++export function scaleChartIsSuperseded(payload: ScaleChartPayload, channelId: string, siblings: ReadonlyArray<{ channelId: string; content: string; senderType: string }>): boolean {
++  const id = payload.source_assessment.assessment_id;
++  return siblings.some(message => {
++    if (message.channelId !== channelId || message.senderType !== "agent") return false;
++    const later = parseScaleChartMessage(message.content);
++    if (!later || later.source_assessment.assessment_id === id || later.source_assessment.patient_id !== payload.source_assessment.patient_id) return false;
++    return later.source_assessment.supersedes === id || later.history.some(h => h.assessment_id === id && h.stale === true);
++  });
++}
++const labels: Record<string, string> = {
++  mas_2016: "MAS 2016", ms_2019: "MS 2019", hlh_2004: "HLH-2004", ferritin: "铁蛋白", platelets: "血小板", platelet: "血小板", ast: "AST", triglycerides: "甘油三酯", fibrinogen: "纤维蛋白原", fever: "发热", sjia: "全身型幼年特发性关节炎背景", wbc: "白细胞", hemoglobin: "血红蛋白", neutrophils: "中性粒细胞",
++  status: "状态", statement: "说明", reason: "原因", value: "数值", score: "得分", total: "合计", threshold: "阈值", criteria_met: "达到标准", criteria_not_met: "未达到标准", met: "达到", not_met: "未达到", unknown: "未知", missing: "缺失", complete: "完整", partial: "部分完成", needs_context: "需补充适用背景", not_applicable: "不适用", eligible: "适用", ineligible: "不适用", confirmed: "已确认", true: "是", false: "否", research_only: "仅研究评估", clinical_review: "临床复核", eligibility: "适用性", calculation_status: "计算状态", mathematical_result: "数学结果", medical_conclusion: "量表结论", usable_status: "可用状态", pending_requirements: "待补充信息", information_needed: "所需信息", action: "建议", unit: "单位", count: "条数", matched_count: "符合条数", required_count: "所需条数", detail: "详情", details: "详情", criteria: "判定条目", name: "名称", label: "项目", result: "结果", conclusion: "结论", waiting: "待确认", evidence_questions: "待核对证据", components: "分项", observed: "观测值", operator: "比较符", lower: "下界", upper: "上界", score_range: "分数范围", score_interval: "分数区间", prerequisite: "适用前提", requirements: "要求", warning: "提醒", no_warning: "无提醒", none: "无", retrospective: "回顾评估",
++};
++Object.assign(labels, { anc: "中性粒细胞绝对计数", ldh: "乳酸脱氢酶", scd25: "可溶性CD25", prior_diagnosis: "诊断或病史记录", known_or_suspected_sjia: "已知或疑似sJIA", active_arthritis: "活动性关节炎", cns: "中枢神经系统表现", hemorrhage: "出血表现", normalized: "标准化输入", execution_mode: "使用方式", selection_status: "工具选择", selection_reason: "选择原因", requested: "本次已选择", not_requested: "本次未选择", skipped: "未运行", not_run: "未计算", failed: "计算失败", invalid_input: "输入需修正", no_reference: "暂无参照记录", conditions: "判定条件", contributions: "分项贡献", contribution: "贡献", points: "分值", items: "条目", checks: "核对项", matched: "符合", fulfilled: "已满足", required: "要求", input: "输入", inputs: "输入依据", formula: "计算公式", total_score: "总分", score_lower: "分数下界", score_upper: "分数上界", criterion: "标准", evidence: "证据", description: "说明", criteria_count: "符合条数", missing_fields: "缺失项目", original_result: "原始结果", execution_status: "执行状态", assessment_status: "评估状态", calculated: "已计算", bounded: "区间值", direction: "方向", increase: "上升", decrease: "下降", stable: "稳定", insufficient_data: "资料不足", previous: "较上次", first: "较首次", absolute_change: "绝对变化", percent_change: "百分比变化", reference_value: "参考值", current_value: "本次值", reference_time: "参考时间", current_time: "本次时间" });
++function text(value: unknown): string {
++  if (value == null || value === "" || (typeof value === "string" && value.startsWith("unknown"))) return "未知";
++  if (typeof value === "string") return labels[value] ?? value;
++  if (typeof value === "number" || typeof value === "boolean") return labels[String(value)] ?? String(value);
++  if (Array.isArray(value)) return value.map(text).join("；") || "无";
++  if (object(value)) return Object.entries(value).filter(([k]) => labels[k]).map(([k, v]) => `${labels[k]}：${text(v)}`).join("；") || "未提供";
++  return "未知";
++}
++export function formatScaleFact(f: RecordValue): string {
++  const unit = typeof f.unit === "string" ? ` ${f.unit}` : "";
++  if (f.state === "conflict") return "来源冲突";
++  if (f.state === "not_applicable") return "不适用";
++  if (f.state === "missing" || f.state === "unknown") return "未知";
++  if (f.lower != null || f.upper != null) {
++    if (f.lower != null && f.upper === f.lower && !f.lower_open && !f.upper_open) return `${text(f.lower)}${unit}`;
++    return `${f.lower_open ? "(" : "["}${f.lower == null ? "−∞" : text(f.lower)}, ${f.upper == null ? "+∞" : text(f.upper)}${f.upper_open ? ")" : "]"}${unit}`;
++  }
++  return `${f.operator && f.operator !== "=" ? text(f.operator) + " " : ""}${text(f.value)}${unit}`;
++}
++function ScaleSection({ value, entry = false }: { value: RecordValue; entry?: boolean }) {
++  const rows = Object.entries(value).filter(([key]) => labels[key]);
++  return rows.length ? <dl className="space-y-1">{rows.map(([key, v]) => <div key={key}><dt className="inline font-medium">{labels[key]}：</dt><dd className="inline">{entry && (key === "eligibility" || key === "clinical_review") && v === "not_applicable" ? value.selection_status === "not_requested" ? "本次未选择" : "此原表不使用该项入口检查" : text(v)}</dd></div>)}</dl> : <p>{text(value)}</p>;
++}
++/** Plot recorded values only. Each literal unit gets its own independent visual axis. */
++export function ScaleFactChart({ facts, concept }: { facts: Fact[]; concept: string }) {
++  const observations = facts.filter(f => f.concept === concept).sort((a, b) => (Date.parse(String(a.event_time)) || 0) - (Date.parse(String(b.event_time)) || 0));
++  const units = [...new Set(observations.map(f => typeof f.unit === "string" ? f.unit : ""))];
++  return <div className="space-y-2">{units.map(unit => {
++    const group = observations.filter(f => (typeof f.unit === "string" ? f.unit : "") === unit);
++    const points = group.map((fact, index) => {
++      const value = typeof fact.value === "number" ? fact.value : typeof fact.value === "string" && fact.value.trim() ? Number(fact.value) : NaN;
++      const valid = Number.isFinite(value) && fact.state !== "unknown" && fact.state !== "missing" && fact.state !== "conflict" && fact.state !== "not_applicable" && Number.isFinite(Date.parse(String(fact.event_time))) && fact.lower == null && fact.upper == null;
++      const exact = valid && (fact.operator == null || fact.operator === "=");
++      return { fact, index, value, valid, exact };
++    });
++    const valid = points.filter(p => p.valid);
++    if (!valid.length) return null;
++    const minimum = Math.min(...valid.map(p => p.value));
++    const maximum = Math.max(...valid.map(p => p.value));
++    const times = group.map(f => Date.parse(String(f.event_time))).filter(Number.isFinite);
++    const t0 = Math.min(...times), t1 = Math.max(...times);
++    const x = (index: number) => 42 + (Date.parse(String(group[index].event_time)) - t0) * 322 / Math.max(1, t1 - t0);
++    const y = (value: number) => maximum === minimum ? 80 : 118 - (value - minimum) * 76 / (maximum - minimum);
++    const label = `${labels[concept] ?? concept}原始观测图${unit ? `（${unit}）` : ""}`;
++    return <figure key={unit} className="min-w-0 rounded border border-black/15 p-2">
++      <figcaption className="text-xs font-medium">{label}</figcaption>
++      <svg viewBox="0 0 420 160" role="img" aria-label={label} className="h-auto w-full max-w-lg" data-scale-unit={unit}>
++        <title>{label}；空心箭头为带比较符的边界记录，不作为精确值连线。</title>
++        <path d="M 42 28 V 128 H 376" fill="none" stroke="currentColor" strokeOpacity="0.3" />
++        <text x="3" y="43" fontSize="10">{maximum}</text><text x="3" y="122" fontSize="10">{minimum}</text>
++        {points.map((point, i) => {
++          const previous = points[i - 1];
++          return point.exact && previous?.exact ? <line key={`line-${i}`} data-exact-segment="true" x1={x(previous.index)} y1={y(previous.value)} x2={x(point.index)} y2={y(point.value)} stroke="currentColor" strokeWidth="2" /> : null;
++        })}
++        {valid.map(point => <g key={point.fact.fact_ref} data-fact-ref={point.fact.fact_ref} data-observation-kind={point.exact ? "exact" : "bound"}>
++          <title>{String(point.fact.event_time ?? "日期未知")}：{formatScaleFact(point.fact)}</title>
++          <circle cx={x(point.index)} cy={y(point.value)} r="4" fill={point.exact ? "currentColor" : "white"} stroke="currentColor" strokeWidth="2" />
++          {!point.exact && <text x={x(point.index)} y={y(point.value) - 9} textAnchor="middle" fontSize="13">{String(point.fact.operator).startsWith(">") ? "↑" : String(point.fact.operator).startsWith("<") ? "↓" : "◇"} {formatScaleFact(point.fact)}</text>}
++        </g>)}
++        <text x="42" y="149" fontSize="10">{String(group[0].event_time ?? "日期未知").slice(0, 10)}</text>
++        {group.length > 1 && <text x="364" y="149" textAnchor="end" fontSize="10">{String(group[group.length - 1].event_time ?? "日期未知").slice(0, 10)}</text>}
++      </svg>
++      <p className="text-xs">实心点为精确值；空心箭头仅标示原始边界，不与相邻点连线。</p>
++    </figure>;
++  })}</div>;
++}
++export default function ScaleChartCard({ payload: p, serverSlug, channelId, agentId, agentName }: { payload: ScaleChartPayload; serverSlug?: string; channelId?: string; agentId?: string; agentName?: string }) {
++  const a = p.source_assessment;
++  const execution = object(p.execution) ? p.execution : null;
++  const moduleStatuses = execution && object(execution.module_statuses) ? execution.module_statuses : null;
++  const interpretationFailed = moduleStatuses?.interpretation === "failed";
++  const visibleMetrics = ["ferritin", "platelets", "ast"].filter(concept => p.facts.some(f => f.concept === concept && f.state !== "unknown" && f.state !== "missing" && (typeof f.value === "number" || (typeof f.value === "string" && f.value.trim() !== "" && Number.isFinite(Number(f.value))))));
++  const facts = [...p.facts].sort((x, y) => String(x.event_time ?? "9999").localeCompare(String(y.event_time ?? "9999")));
++  const correct = (fact: Fact) => window.dispatchEvent(new window.CustomEvent("scale-chart-correct", { detail: { patient_id: a.patient_id, assessment_id: a.assessment_id, fact_ref: fact.fact_ref, channel_id: channelId, agent_id: agentId, agent_name: agentName } }));
++  return <article className="my-2 w-full min-w-0 max-w-2xl space-y-3 rounded-lg border border-black/20 bg-white p-3 text-sm text-black break-words" aria-label="随诊量表更新">
++    <section aria-label="本次摘要" className="space-y-2">
++      <h3 className="font-bold">随诊量表更新 · {a.patient_id}</h3>
++      <p>评估日期：{text(a.evaluation_at)} · 资料截至：{text(a.knowledge_as_of)}</p>
++      {a.stale && <p role="status" className="font-bold">历史版本已失效，请以更新后的评估为准。</p>}
++      {a.mode === "retrospective" && <p>回顾评估：用于整理当时资料。</p>}
++      <p>{interpretationFailed ? "动态解释暂未生成；已完成的计算仍保留" : text(p.interpretation.statement)}</p>
++      <dl className="grid grid-cols-1 gap-1 sm:grid-cols-2">{[["care_phase", "诊疗阶段"], ["care_setting", "就诊场景"], ["diagnosis_record", "诊断记录"], ["evidence_identity", "证据身份"]].map(([key, label]) => <div key={key}><dt className="inline font-medium">{label}：</dt><dd className="inline">{text(object(p.display_context[key]) ? p.display_context[key].value : null)}</dd></div>)}</dl>
++      <div className="rounded border border-black/10 p-2"><strong>{a.stale ? "当时的提醒（已失效）" : "本次评估当时的提示"}：</strong>{interpretationFailed ? "本次未生成新提醒；此前结果见历史版本" : text(p.warning.message ?? p.warning.status)}<p className="mt-1 text-xs">量表结果与提醒不等同于诊断；诊断以诊疗记录为准。</p></div>
++    </section>
++    {visibleMetrics.length > 0 && <section aria-label="关键指标趋势" className="space-y-2">{visibleMetrics.map(concept => <ScaleFactChart key={concept} facts={facts} concept={concept} />)}</section>}
++    <details><summary className="cursor-pointer font-bold">事实时间线（{facts.length} 项）</summary><ol className="mt-2 space-y-3">{facts.map((f, i) => <li key={`${f.fact_ref}-${i}`} className="border-l-2 border-black/20 pl-2"><p>{text(f.event_time)} · {labels[f.concept] ?? f.concept}：<strong>{formatScaleFact(f)}</strong></p><p className="text-xs">记录时间：{text(f.recorded_time)} · 事实版本：{text(f.fact_revision)}</p><p className="text-xs">来源：{object(f.source) ? text(f.source.quote ?? f.source.source_ids ?? f.source.label ?? f.source.message_id) : text(f.source)}</p><button type="button" disabled={!agentId || !agentName} onClick={() => correct(f)} className="mt-1 underline">更正此事实</button><p className="select-text text-xs">更正 {labels[f.concept] ?? f.concept}（{f.fact_ref}）</p></li>)}</ol></details>
++    <details><summary className="cursor-pointer font-bold">指标变化</summary><div className="mt-2 space-y-3">{Object.entries(p.trend).filter(([, v]) => object(v)).map(([lab, value]) => <details key={lab}><summary className="cursor-pointer font-bold">{labels[lab] ?? lab}</summary>{!visibleMetrics.includes(lab) && <ScaleFactChart facts={facts} concept={lab} />}{(["previous", "first"] as const).map(mode => {
++      const group = (value as RecordValue)[mode];
++      if (!object(group)) return null;
++      if (group.status === "no_reference") return <p key={mode}>{labels[mode]}：暂无参照记录</p>;
++      return <div key={mode} className="mt-1 border-l-2 border-black/15 pl-2"><strong>{labels[mode]}</strong>{["reference_value", "current_value", "absolute_change", "percent_change"].map(key => <p key={key}>{labels[key]}：{object(group[key]) ? formatScaleFact(group[key]) : "未知"}</p>)}{group.status != null && <p>状态：{text(group.status)}</p>}</div>;
++    })}</details>)}</div></details>
++    <details><summary className="cursor-pointer font-bold">原量表结果</summary><div className="mt-2 space-y-3">{Object.entries(p.scales).map(([key, scale]) => <details key={key} className="rounded border border-black/15 p-2"><summary className="cursor-pointer font-bold">{labels[key] ?? key} · {text((scale.result as RecordValue).status ?? (scale.process as RecordValue).calculation_status)}</summary>{[["entry", "入口与适用前提"], ["process", "计算过程"], ["result", "量表原结果"]].map(([part, label]) => <div key={part} className="mt-2"><h5 className="font-medium">{label}</h5><ScaleSection value={scale[part] as RecordValue} entry={part === "entry"} /></div>)}</details>)}</div></details>
++    <details><summary className="cursor-pointer font-bold">证据与历史版本</summary><div className="mt-2 space-y-2"><p>当前评估版本：{text(a.assessment_revision)}</p>{p.source_messages.map((s, i) => <p key={`${s.message_id}-${i}`}>{serverSlug ? <a className="underline" href={buildMessagePermalink(serverSlug, s.channel_id, s.message_id)}>查看来源消息 {i + 1}</a> : <span>来源消息：{s.message_id}</span>}</p>)}{p.history.map((h, i) => <p key={i}>历史评估：{text(h.assessment_id)} · 版本 {text(h.revision ?? h.assessment_revision)} {serverSlug && nonempty(h.channel_id ?? channelId) && nonempty(h.card_message_id) && <a className="underline" href={buildMessagePermalink(serverSlug, String(h.channel_id ?? channelId), h.card_message_id)}>查看历史卡片</a>}</p>)}<details><summary className="cursor-pointer">原始数据</summary><pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all text-xs">{JSON.stringify(p, null, 2)}</pre></details></div></details>
++  </article>;
++}
+diff --git a/packages/web/tests/scaleChartCard.behavior.test.tsx b/packages/web/tests/scaleChartCard.behavior.test.tsx
+new file mode 100644
+index 0000000..ef19ef1
+--- /dev/null
++++ b/packages/web/tests/scaleChartCard.behavior.test.tsx
+@@ -0,0 +1,177 @@
++import "./helpers/domSetup";
++import { gzipSync } from "node:zlib";
++import assert from "node:assert/strict";
++import test, { afterEach } from "node:test";
++import { cleanup, fireEvent, render, screen, within, waitFor } from "@testing-library/react";
++import { act } from "react";
++import { MemoryRouter } from "react-router-dom";
++import { TestIntlProvider } from "./helpers/intl";
++import MessageInput from "../src/components/message/MessageInput";
++import api from "../src/api/client";
++import { useMessageStore } from "../src/store/messageStore";
++import ScaleChartCard, { parseScaleChartMessage, scaleChartIsSuperseded, formatScaleFact, ScaleFactChart, type ScaleChartPayload } from "../src/components/message/ScaleChartCard";
++
++afterEach(cleanup);
++const payload = {
++  presentation_version: "chat-scale-card-1.0", message_type: "scale_chart_update",
++  source_assessment: { assessment_id: "a1", assessment_revision: 1, patient_id: "p1", stale: false, evaluation_at: "2026-01-21", knowledge_as_of: "2026-01-22" },
++  source_profile: {}, trend: {}, update: {}, history: [], source_messages: [],
++  facts: [{ fact_ref: "f1", fact_revision: 1, concept: "ferritin", value: 15000, operator: ">", unit: "ng/mL", event_time: "2026-01-21" }],
++  display_context: { diagnosis_record: { value: "尚未确诊" } },
++  interpretation: { statement: "请结合临床资料复核" }, warning: { message: "存在量表信号" },
++  scales: { mas_2016: { entry: { eligibility: "unknown" }, process: { matched_count: 3 }, result: { mathematical_result: "met" } } },
++} as ScaleChartPayload;
++const envelope = (p: unknown) => `\x60\x60\x60scale_chart_update\n${JSON.stringify(p)}\n\x60\x60\x60`;
++test("only complete valid envelopes become cards", () => {
++  assert.ok(parseScaleChartMessage(envelope(payload)));
++  assert.equal(parseScaleChartMessage(envelope({ ...payload, facts: [{ fact_ref: 1 }] })), null);
++  assert.equal(parseScaleChartMessage(envelope({ ...payload, scales: { mas_2016: { result: {} } } })), null);
++  assert.equal(parseScaleChartMessage(`ordinary text\n${envelope(payload)}`), null);
++  assert.equal(parseScaleChartMessage('```scale_chart_update\nnot json\n```'), null);
++});
++test("censored facts preserve their comparator and correction refers to the precise fact", () => {
++  assert.equal(formatScaleFact(payload.facts[0]), "> 15000 ng/mL");
++  render(<ScaleChartCard payload={payload} channelId="channel-1" agentId="agent-1" agentName="scale-study" />);
++  assert.ok(screen.getByText("> 15000 ng/mL"));
++  let detail: unknown;
++  const listener = (e: Event) => { detail = (e as CustomEvent).detail; };
++  window.addEventListener("scale-chart-correct", listener);
++  fireEvent.click(screen.getByRole("button", { name: "更正此事实" }));
++  window.removeEventListener("scale-chart-correct", listener);
++  assert.deepEqual(detail, { patient_id: "p1", assessment_id: "a1", fact_ref: "f1", channel_id: "channel-1", agent_id: "agent-1", agent_name: "scale-study" });
++});
++test("original scale result is isolated from diagnosis and stale alerts are historical", () => {
++  render(<ScaleChartCard payload={{ ...payload, source_assessment: { ...payload.source_assessment, stale: true } }} />);
++  const summary = screen.getByRole("region", { name: "本次摘要" });
++  assert.ok(within(summary).getByText("尚未确诊"));
++  assert.equal(within(summary).queryByText("达到"), null);
++  assert.ok(screen.getByText("达到"));
++  assert.ok(screen.getByText("历史版本已失效，请以更新后的评估为准。"));
++  assert.ok(screen.getByText("当时的提醒（已失效）", { exact: false }));
++});
++
++test("trend intervals keep open bounds and units without replacing them with exact points", () => {
++  render(<ScaleChartCard payload={{ ...payload, trend: { ferritin: { previous: { status: "calculated", reference_value: { value: 100, unit: "ng/mL" }, current_value: { value: 15000, operator: ">", unit: "ng/mL" }, absolute_change: { lower: "14900", upper: null, lower_open: true, upper_open: true, unit: "ng/mL" } } } } }} />);
++  assert.ok(screen.getByText("绝对变化：(14900, +∞) ng/mL"));
++  assert.ok(screen.getByText("本次值：> 15000 ng/mL"));
++});
++
++
++test("correction drafts stay within the card channel and preserve existing text", async () => {
++  const originalGet = api.get;
++  api.get = (async () => ({ data: [] })) as typeof api.get;
++  useMessageStore.setState({ drafts: { "correction-channel": "已有内容" } });
++  try {
++    render(<MemoryRouter><TestIntlProvider><MessageInput channelId="correction-channel" channelName="随诊" /></TestIntlProvider></MemoryRouter>);
++    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
++    fireEvent(window, new window.CustomEvent("scale-chart-correct", { detail: { channel_id: "another-channel", fact_ref: "wrong" } }));
++    assert.equal(input.value, "已有内容");
++    fireEvent(window, new window.CustomEvent("scale-chart-correct", { detail: { channel_id: "correction-channel", fact_ref: "ferritin-1", agent_id: "agent-1", agent_name: "scale-study" } }));
++    await waitFor(() => assert.equal(input.value, "已有内容\n@scale-study 更正事实 ferritin-1："));
++  } finally { api.get = originalGet; }
++});
++
++test("supersession is patient and channel scoped and preserves the original payload", () => {
++  const newer = { ...payload, source_assessment: { ...payload.source_assessment, assessment_id: "a2", supersedes: "a1" }, history: [{ assessment_id: "a1", stale: true }] };
++  assert.equal(scaleChartIsSuperseded(payload, "c1", [{ channelId: "c2", content: envelope(newer), senderType: "agent" }]), false);
++  assert.equal(scaleChartIsSuperseded(payload, "c1", [{ channelId: "c1", content: envelope(newer), senderType: "agent" }]), true);
++  assert.equal(scaleChartIsSuperseded(payload, "c1", [{ channelId: "c1", content: envelope(newer), senderType: "human" }]), false);
++  assert.equal(payload.source_assessment.stale, false);
++});
++
++test("history cards use Raft message permalinks", () => {
++  render(<ScaleChartCard payload={{ ...payload, history: [{ assessment_id: "a0", revision: 1, channel_id: "c0", card_message_id: "m0" }] }} serverSlug="dev" />);
++  assert.match(screen.getByRole("link", { name: "查看历史卡片" }).getAttribute("href") ?? "", /\/s\/dev\/channel\/c0.*m0/);
++});
++
++
++test("compressed transport preserves full payload and rejects corrupt or oversized envelopes", () => {
++  const large = { ...payload, interpretation: { statement: "完整证据".repeat(8000) } };
++  const bytes = Buffer.from(JSON.stringify(large), "utf8");
++  const packed = { encoding: "gzip-base64", uncompressed_bytes: bytes.length, data: gzipSync(bytes).toString("base64") };
++  assert.deepEqual(parseScaleChartMessage(envelope(packed)), large);
++  assert.equal(parseScaleChartMessage(envelope({ ...packed, uncompressed_bytes: bytes.length + 1 })), null);
++  assert.equal(parseScaleChartMessage(envelope({ ...packed, uncompressed_bytes: 2_000_001 })), null);
++  assert.equal(parseScaleChartMessage(envelope({ ...packed, data: "not!base64" })), null);
++  assert.equal(parseScaleChartMessage(envelope({ ...packed, data: Buffer.alloc(32_001).toString("base64") })), null);
++  const invalid = Buffer.from("not a scale payload");
++  assert.equal(parseScaleChartMessage(envelope({ encoding: "gzip-base64", uncompressed_bytes: invalid.length, data: gzipSync(invalid).toString("base64") })), null);
++});
++
++
++test("raw trend graphics never connect a censored value or mix literal units", () => {
++  const facts = [
++    { fact_ref: "a", concept: "ferritin", event_time: "2026-01-01", value: 100, operator: "=", unit: "ng/mL" },
++    { fact_ref: "b", concept: "ferritin", event_time: "2026-01-02", value: 2000, operator: ">", unit: "ng/mL" },
++    { fact_ref: "c", concept: "ferritin", event_time: "2026-01-03", value: 500, operator: "=", unit: "ng/mL" },
++    { fact_ref: "d", concept: "ferritin", event_time: "2026-01-04", value: 600, operator: "=", unit: "ng/mL" },
++    { fact_ref: "e", concept: "ferritin", event_time: "2026-01-05", value: 0.7, operator: "=", unit: "mg/L" },
++  ];
++  const { container } = render(<ScaleFactChart facts={facts} concept="ferritin" />);
++  assert.equal(container.querySelectorAll('svg[data-scale-unit="ng/mL"] [data-exact-segment]').length, 1);
++  assert.equal(container.querySelectorAll('svg[data-scale-unit="mg/L"] [data-exact-segment]').length, 0);
++  assert.equal(container.querySelector('[data-fact-ref="b"]')?.getAttribute("data-observation-kind"), "bound");
++  assert.equal(container.querySelector('[data-fact-ref="b"] circle')?.getAttribute("fill"), "white");
++  assert.ok(screen.getByText("↑ > 2000 ng/mL"));
++});
++
++
++test("HLH absence of an entry check does not imply that the patient is ineligible", () => {
++  render(<ScaleChartCard payload={{ ...payload, scales: { hlh_2004: { entry: { eligibility: "not_applicable", clinical_review: "not_applicable", selection_status: "requested" }, process: { calculation_status: "complete" }, result: { status: "criteria_met" } } } }} />);
++  assert.equal(screen.getAllByText("此原表不使用该项入口检查").length, 2);
++  assert.equal(screen.queryByText("不适用", { exact: true }), null);
++  assert.ok(screen.getByText("达到标准"));
++});
++
++
++test("available key plots are visible outside accordions and interpretation failures are explicit", () => {
++  render(<ScaleChartCard payload={{ ...payload, execution: { module_statuses: { interpretation: "failed" } } }} />);
++  const plots = screen.getByRole("region", { name: "关键指标趋势" });
++  assert.ok(within(plots).getByRole("img", { name: "铁蛋白原始观测图（ng/mL）" }));
++  assert.equal(plots.closest("details"), null);
++  assert.ok(screen.getByText("动态解释暂未生成；已完成的计算仍保留"));
++  assert.equal(screen.queryByText("请结合临床资料复核"), null);
++});
++
++test("correction card submission sends a formal trusted agent mention and preserves earlier mentions", async () => {
++  const originalGet = api.get;
++  const originalSend = useMessageStore.getState().sendMessage;
++  const calls: Parameters<typeof originalSend>[] = [];
++  api.get = (async () => ({ data: [] })) as typeof api.get;
++  useMessageStore.setState({ drafts: {}, sendMessage: async (...args) => {
++    calls.push(args);
++    return { messageId: "sent", pendingMentionActions: [], unresolvedMentionHandles: [] };
++  } });
++  try {
++    render(<MemoryRouter><TestIntlProvider>
++      <ScaleChartCard payload={payload} channelId="correction-send" agentId="trusted-agent-id" agentName="trusted-scale-agent" />
++      <MessageInput channelId="correction-send" channelName="随诊" />
++    </TestIntlProvider></MemoryRouter>);
++    fireEvent(window, new window.CustomEvent("scale-chart-correct", { detail: { channel_id: "correction-send", fact_ref: "previous", agent_id: "other-agent", agent_name: "other-helper" } }));
++    fireEvent.click(screen.getByRole("button", { name: "更正此事实" }));
++    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
++    assert.match(input.value, /@trusted-scale-agent 更正事实 f1：/);
++    await act(async () => { fireEvent.submit(input.closest("form")!); });
++    await waitFor(() => assert.equal(calls.length, 1));
++    assert.equal(calls[0][0], "correction-send");
++    assert.deepEqual(calls[0][6], [
++      { type: "agent", id: "other-agent", name: "other-helper" },
++      { type: "agent", id: "trusted-agent-id", name: "trusted-scale-agent" },
++    ]);
++  } finally { api.get = originalGet; useMessageStore.setState({ sendMessage: originalSend }); }
++});
++
++test("conflicting facts break lines and time spacing reflects actual elapsed days", () => {
++  const facts = [
++    { fact_ref: "day1", concept: "ast", event_time: "2026-01-01", value: 30, state: "present", unit: "U/L" },
++    { fact_ref: "day2", concept: "ast", event_time: "2026-01-02", value: 40, state: "conflict", unit: "U/L" },
++    { fact_ref: "day5", concept: "ast", event_time: "2026-01-05", value: 60, state: "present", unit: "U/L" },
++  ];
++  const { container, rerender } = render(<ScaleFactChart facts={facts} concept="ast" />);
++  assert.equal(formatScaleFact(facts[1]), "来源冲突");
++  assert.equal(container.querySelector('[data-fact-ref="day2"]'), null);
++  assert.equal(container.querySelectorAll('[data-exact-segment]').length, 0);
++  rerender(<ScaleFactChart facts={facts.map(f => ({ ...f, state: "present" }))} concept="ast" />);
++  const cx = (id: string) => Number(container.querySelector(`[data-fact-ref="${id}"] circle`)?.getAttribute("cx"));
++  assert.ok(Math.abs((cx("day2") - cx("day1")) / (cx("day5") - cx("day1")) - 0.25) < 0.0001);
++});
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index ca92e81..038c5ab 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -809,6 +809,9 @@ importers:
+       emoji-picker-react:
+         specifier: 4.19.1
+         version: 4.19.1(react@19.2.4)
++      fflate:
++        specifier: 0.4.8
++        version: 0.4.8
+       flexlayout-react:
+         specifier: 0.9.2
+         version: 0.9.2(react-dom@19.2.4(react@19.2.4))(react@19.2.4)

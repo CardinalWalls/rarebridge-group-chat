@@ -1,0 +1,174 @@
+{
+  "version": "living-scale-rules-1.1",
+  "numeric_domain": "nonnegative real; no invented physiological maxima",
+  "evidence_domain": "exact, interval (open/closed bounds), unknown; conflicts/unsupported units are not completed by solver",
+  "labs": {
+    "ferritin": {
+      "unit": "ng/mL",
+      "aliases": {
+        "ng/mL": "1",
+        "ug/L": "1",
+        "μg/L": "1"
+      }
+    },
+    "platelets": {
+      "unit": "10^9/L",
+      "aliases": {
+        "10^9/L": "1",
+        "10^3/uL": "1"
+      }
+    },
+    "ast": {
+      "unit": "U/L",
+      "aliases": {
+        "U/L": "1"
+      }
+    },
+    "triglycerides": {
+      "unit": "mg/dL",
+      "aliases": {
+        "mg/dL": "1",
+        "mmol/L": "88.57"
+      }
+    },
+    "fibrinogen": {
+      "unit": "mg/dL",
+      "aliases": {
+        "mg/dL": "1",
+        "g/L": "100",
+        "mg/L": "0.1"
+      }
+    },
+    "ldh": {
+      "unit": "U/L",
+      "aliases": {
+        "U/L": "1"
+      }
+    },
+    "hemoglobin": {
+      "unit": "g/L",
+      "aliases": {
+        "g/L": "1",
+        "g/dL": "10"
+      }
+    },
+    "anc": {
+      "unit": "10^9/L",
+      "aliases": {
+        "10^9/L": "1",
+        "10^3/uL": "1"
+      }
+    },
+    "scd25": {
+      "unit": "U/mL",
+      "aliases": {
+        "U/mL": "1"
+      }
+    }
+  },
+  "clinical": [
+    "fever",
+    "sjia",
+    "alternative_causes_excluded",
+    "cns",
+    "hemorrhage",
+    "active_arthritis",
+    "splenomegaly",
+    "hemophagocytosis",
+    "nk_activity_low",
+    "fasting",
+    "molecular_hlh",
+    "infant_under_4_weeks",
+    "no_malignancy"
+  ],
+  "mas_2016": {
+    "source": "10.1002/art.39332 Figure 2",
+    "eligibility": [
+      "fever",
+      "sjia"
+    ],
+    "required": [
+      "ferritin",
+      ">",
+      "684"
+    ],
+    "at_least": 2,
+    "additional": [
+      [
+        "platelets",
+        "<=",
+        "181"
+      ],
+      [
+        "ast",
+        ">",
+        "48"
+      ],
+      [
+        "triglycerides",
+        ">",
+        "156"
+      ],
+      [
+        "fibrinogen",
+        "<=",
+        "360"
+      ]
+    ],
+    "clinical_review": "alternative_causes_excluded"
+  },
+  "ms_2019": {
+    "source": "10.1136/annrheumdis-2019-215211 Table 4",
+    "eligibility": [
+      "fever",
+      "sjia"
+    ],
+    "coefficients": {
+      "cns": "2.44",
+      "hemorrhage": "1.54",
+      "active_arthritis": "-1.30",
+      "platelets": "-0.003",
+      "ldh": "0.001",
+      "fibrinogen": "-0.004",
+      "ferritin": "0.0001"
+    },
+    "cutoff": "-2.1",
+    "comparison": ">="
+  },
+  "hlh_2004": {
+    "source": "10.1002/pbc.21039 Table I",
+    "molecular_route": "molecular_hlh",
+    "at_least": 5,
+    "hemoglobin_cutoff": "90",
+    "infant_hemoglobin_cutoff": "100",
+    "platelets_cutoff": "100",
+    "anc_cutoff": "1",
+    "triglycerides_mg_dl_cutoff": "265",
+    "triglycerides_mmol_l_cutoff": "3",
+    "fibrinogen_cutoff": "150",
+    "ferritin_cutoff": "500",
+    "scd25_cutoff": "2400",
+    "pathology_sites": [
+      "bone_marrow",
+      "spleen",
+      "lymph_node"
+    ],
+    "background_note": "no_malignancy retained for clinical review, not a ninth item nor automatic exclusion of malignancy-associated HLH"
+  },
+  "scope": "Original numerical thresholds unchanged; evidence/state identities and temporal node changes preserved. Rule-paths-1.0 supplies source-mapped internal certificates; no terminal-label catalog.",
+  "clinical_definitions": {
+    "fever": "2016/MS enter with current febrile known/suspected sJIA; HLH Table I lists fever without adding duration/temperature cutoffs",
+    "sjia": "Known or clinically suspected systemic juvenile idiopathic arthritis; reported family wording is not itself an independent diagnosis",
+    "alternative_causes_excluded": "Clinical review of other explanations for 2016 laboratory abnormalities; separate from mathematical combination",
+    "cns": "MS source: lethargy, seizures, irritability, confusion, headache, mood changes, coma; use clinically interpreted evidence",
+    "hemorrhage": "MS source: petechiae, ecchymoses/purpura, mucosal or gastrointestinal bleeding, intravascular coagulation; one 0/1 variable",
+    "active_arthritis": "Current active arthritis, not history or arthralgia alone",
+    "splenomegaly": "Spleen enlargement from clinical examination/imaging",
+    "hemophagocytosis": "Pathology in bone marrow, spleen or lymph node; site required",
+    "nk_activity_low": "Low/absent functional NK activity per local lab, not NK count/proportion",
+    "fasting": "Confirmed fasting status for reported triglyceride sample; absent/unknown makes TG branch unknown, not negative",
+    "molecular_hlh": "Molecular diagnosis consistent with HLH, not a variant without clinical interpretation",
+    "infant_under_4_weeks": "Age at this observation, only influences Hb cutoff",
+    "no_malignancy": "Clinical background retained; not ninth criterion or automatic denial of malignancy-associated HLH"
+  }
+}

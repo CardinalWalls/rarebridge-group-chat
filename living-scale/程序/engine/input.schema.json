@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Living scale evidence snapshot v1",
+  "type": "object",
+  "required": [
+    "patient_id",
+    "observed_at",
+    "recorded_at",
+    "source",
+    "labs",
+    "clinical"
+  ],
+  "properties": {
+    "patient_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observed_at": {
+      "$ref": "#/$defs/evidence_time"
+    },
+    "recorded_at": {
+      "$ref": "#/$defs/evidence_time"
+    },
+    "source": {
+      "type": [
+        "string",
+        "object"
+      ]
+    },
+    "identity": {
+      "type": "string"
+    },
+    "labs": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "ferritin",
+          "platelets",
+          "ast",
+          "triglycerides",
+          "fibrinogen",
+          "ldh",
+          "hemoglobin",
+          "anc",
+          "scd25"
+        ]
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "null"
+          },
+          {
+            "$ref": "#/$defs/lab"
+          }
+        ]
+      }
+    },
+    "clinical": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "fever",
+          "sjia",
+          "alternative_causes_excluded",
+          "cns",
+          "hemorrhage",
+          "active_arthritis",
+          "splenomegaly",
+          "hemophagocytosis",
+          "nk_activity_low",
+          "fasting",
+          "molecular_hlh",
+          "infant_under_4_weeks",
+          "no_malignancy"
+        ]
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "enum": [
+              "present",
+              "absent",
+              "unknown",
+              "conflict"
+            ]
+          },
+          {
+            "type": "object",
+            "required": [
+              "state"
+            ],
+            "properties": {
+              "state": {
+                "enum": [
+                  "present",
+                  "absent",
+                  "unknown",
+                  "conflict"
+                ]
+              },
+              "site": {
+                "enum": [
+                  "bone_marrow",
+                  "spleen",
+                  "lymph_node",
+                  "liver"
+                ]
+              },
+              "source": {},
+              "note": {
+                "type": "string"
+              },
+              "observed_at": {
+                "$ref": "#/$defs/evidence_time"
+              },
+              "recorded_at": {
+                "$ref": "#/$defs/evidence_time"
+              }
+            },
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "numeric": {
+      "anyOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^(?:[0-9]+(?:\\.[0-9]+)?|\\.[0-9]+)(?:/[0-9]+)?$"
+        }
+      ]
+    },
+    "lab": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "present",
+            "unknown",
+            "conflict"
+          ]
+        },
+        "value": {
+          "$ref": "#/$defs/numeric"
+        },
+        "operator": {
+          "enum": [
+            "=",
+            ">",
+            ">=",
+            "<",
+            "<="
+          ]
+        },
+        "lower": {
+          "$ref": "#/$defs/numeric"
+        },
+        "upper": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/numeric"
+            }
+          ]
+        },
+        "lower_open": {
+          "type": "boolean"
+        },
+        "upper_open": {
+          "type": "boolean"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "source": {},
+        "note": {
+          "type": "string"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/evidence_time"
+        },
+        "recorded_at": {
+          "$ref": "#/$defs/evidence_time"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "state"
+          ],
+          "properties": {
+            "state": {
+              "enum": [
+                "unknown",
+                "conflict"
+              ]
+            }
+          },
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "value"
+                ]
+              },
+              {
+                "required": [
+                  "lower"
+                ]
+              },
+              {
+                "required": [
+                  "upper"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "value",
+            "unit"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "lower"
+                ]
+              },
+              {
+                "required": [
+                  "upper"
+                ]
+              }
+            ]
+          },
+          "properties": {
+            "state": {
+              "const": "present"
+            }
+          }
+        },
+        {
+          "required": [
+            "lower",
+            "upper",
+            "unit"
+          ],
+          "not": {
+            "required": [
+              "value"
+            ]
+          },
+          "properties": {
+            "state": {
+              "const": "present"
+            }
+          }
+        }
+      ]
+    },
+    "evidence_time": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^(?:\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}:\\d{2}(?::\\d{2}(?:\\.\\d+)?)?(?:Z|[+-]\\d{2}:\\d{2})?)?|--\\d{2}-\\d{2})$",
+      "description": "Original time precision: RFC3339, local datetime, date, year-unknown date, or null. No inferred timezone or time."
+    }
+  }
+}
